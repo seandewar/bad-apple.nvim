@@ -2,6 +2,8 @@ local api = vim.api
 local fn = vim.fn
 local uv = vim.loop
 
+local sound = require "bad-apple.sound"
+
 local M = {}
 local ns = api.nvim_create_namespace "bad-apple"
 
@@ -31,17 +33,17 @@ local function time_string(ms)
   return ("%02d:%02d.%03d"):format(mins, secs % 60, ms % 1000)
 end
 
-function M.start(file, fps, width, height)
-  file = file
-    or (
-      fn.fnamemodify(debug.getinfo(2, "S").source:sub(2), ":p:h:h")
-      .. "/frames.txt"
-    )
+local DATA_DIR = fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
+  .. "/data"
+
+function M.start(frames_file, audio_file, fps, width, height)
+  frames_file = frames_file or (DATA_DIR .. "/frames.txt")
+  audio_file = audio_file or (DATA_DIR .. "/audio.mp3")
   width = width or 48
   height = height or 19
   fps = fps or 30
 
-  local frames = read_frames(file)
+  local frames = read_frames(frames_file)
   local buf = api.nvim_create_buf(false, true)
   if buf == 0 then
     error "[bad-apple] failed to create buffer"
@@ -63,6 +65,9 @@ function M.start(file, fps, width, height)
     api.nvim_buf_delete(buf, {})
     error "[bad-apple] failed to create window"
   end
+
+  sound.detect_provider()
+  local music_job = sound.play(audio_file)
 
   local ms_per_frame = 1000 / fps
   local runtime_ms = #frames * ms_per_frame
@@ -103,6 +108,7 @@ function M.start(file, fps, width, height)
       frame_timer:stop()
       frame_timer:close()
       vim.schedule(function()
+        sound.stop(music_job)
         if api.nvim_buf_is_valid(buf) then
           api.nvim_buf_delete(buf, {})
         end
@@ -118,6 +124,7 @@ function M.start(file, fps, width, height)
         frame_timer:stop()
         frame_timer:close()
       end
+      sound.stop(music_job)
       if api.nvim_win_is_valid(win) then
         api.nvim_win_close(win, true)
       end
