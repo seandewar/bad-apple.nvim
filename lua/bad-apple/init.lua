@@ -1,8 +1,8 @@
 local api = vim.api
-local fn = vim.fn
 local uv = vim.loop
 
 local sound = require "bad-apple.sound"
+local util = require "bad-apple.util"
 
 local M = {}
 local ns = api.nvim_create_namespace "bad-apple"
@@ -33,20 +33,11 @@ local function time_string(ms)
   return ("%02d:%02d.%03d"):format(mins, secs % 60, ms % 1000)
 end
 
-local DATA_DIR = fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
-  .. "/data"
-
-function M.start(frames_file, audio_file, fps, width, height)
-  frames_file = frames_file or (DATA_DIR .. "/frames.txt")
-  audio_file = audio_file or (DATA_DIR .. "/audio.mp3")
-  width = width or 48
-  height = height or 19
-  fps = fps or 30
-
-  local frames = read_frames(frames_file)
+function M.play(frames_fname, audio_fnames, width, height, fps)
+  local frames = read_frames(frames_fname)
   local buf = api.nvim_create_buf(false, true)
   if buf == 0 then
-    error "[bad-apple] failed to create buffer"
+    util.error "failed to create buffer"
   end
   api.nvim_buf_set_name(buf, "[bad-apple buffer #" .. buf .. "]")
   api.nvim_buf_set_option(buf, "modifiable", false)
@@ -63,18 +54,50 @@ function M.start(frames_file, audio_file, fps, width, height)
   })
   if win == 0 then
     api.nvim_buf_delete(buf, {})
-    error "[bad-apple] failed to create window"
+    util.error "failed to create window"
   end
 
-  sound.detect_provider()
-  local music_job = sound.play(audio_file)
+  local sound_ctx, music_id
+  local ok, result = pcall(sound.new_context)
+  if not ok then
+    util.warn("couldn't initialize sound: " .. result)
+  else
+    sound_ctx = result
+    ok, result = pcall(sound_ctx.play, sound_ctx, audio_fnames)
+    if not ok then
+      util.warn(result)
+    else
+      music_id = result
+      util.echo "providing sound with libcanberra"
+    end
+  end
+
+  local frame_timer = uv.new_timer()
+
+  local function cleanup()
+    if frame_timer:is_active() then
+      frame_timer:stop()
+      frame_timer:close()
+    end
+    if sound_ctx and music_id then
+      ok, result = pcall(sound_ctx.stop, sound_ctx, music_id)
+      if not ok then
+        util.warn(result)
+      end
+      ok, result = pcall(sound_ctx.delete, sound_ctx)
+      if not ok then
+        util.warn(result)
+      end
+      sound_ctx = nil
+    end
+  end
 
   local ms_per_frame = 1000 / fps
   local runtime_ms = #frames * ms_per_frame
-  local frame_timer = uv.new_timer()
   local frame_scheduled = false
   local frame_extmark
   local start_ms = uv.now()
+
   frame_timer:start(0, ms_per_frame, function()
     if frame_scheduled then
       return
@@ -86,6 +109,7 @@ function M.start(frames_file, audio_file, fps, width, height)
       if not api.nvim_buf_is_valid(buf) then
         return
       end
+
       frame_extmark = api.nvim_buf_set_extmark(buf, ns, 0, 0, {
         id = frame_extmark,
         virt_text = {
@@ -102,13 +126,11 @@ function M.start(frames_file, audio_file, fps, width, height)
       })
       frame_scheduled = false
     end)
-    frame_scheduled = true
 
+    frame_scheduled = true
     if frame_nr == #frames then
-      frame_timer:stop()
-      frame_timer:close()
+      cleanup()
       vim.schedule(function()
-        sound.stop(music_job)
         if api.nvim_buf_is_valid(buf) then
           api.nvim_buf_delete(buf, {})
         end
@@ -120,11 +142,7 @@ function M.start(frames_file, audio_file, fps, width, height)
     once = true,
     buffer = buf,
     callback = function()
-      if frame_timer:is_active() then
-        frame_timer:stop()
-        frame_timer:close()
-      end
-      sound.stop(music_job)
+      cleanup()
       if api.nvim_win_is_valid(win) then
         api.nvim_win_close(win, true)
       end
